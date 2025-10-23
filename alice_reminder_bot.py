@@ -34,14 +34,14 @@ UTC = pytz.utc
 # ---- Flask + Bot + Scheduler ----
 app = Flask(__name__)
 
-# ✅ Health-check endpoint
-@app.route("/health")
+# ---- Health check endpoint ----
+@app.route("/health", methods=["GET"])
 def health_check():
+    """
+    Простой endpoint для UptimeRobot или других сервисов.
+    Возвращает статус 200 OK и JSON {"status": "ok"}.
+    """
     return jsonify({"status": "ok"}), 200
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
-bot = TeleBot(TELEGRAM_TOKEN)
 
 jobstores = {"default": SQLAlchemyJobStore(url=SQLITE_JOBSTORE_DB)}
 scheduler = BackgroundScheduler(jobstores=jobstores)
