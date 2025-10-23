@@ -255,18 +255,18 @@ def alice_webhook():
             "response": {"text": "Не поняла, когда нужно напомнить. Повтори время, пожалуйста.", "end_session": False}
         })
 
-    # determine where to send: either DEFAULT_CHAT_ID (env) or map user -> chat (not implemented)
-    target_chat = int(DEFAULT_CHAT_ID) if DEFAULT_CHAT_ID else None
+    # determine where to send: either CHAT_ID (env) or map user -> chat (not implemented)
+    target_chat = int(CHAT_ID) if CHAT_ID else None
     if not target_chat:
         # cannot send if no chat mapping - inform user
-        logger.warning("No DEFAULT_CHAT_ID configured; cannot send reminder to Telegram")
+        logger.warning("No CHAT_ID configured; cannot send reminder to Telegram")
         return jsonify({
             "version": "1.0",
             "response": {"text": "Навык настроен, но не привязан Telegram-чат. Свяжи аккаунты.", "end_session": False}
         })
 
     # schedule and store
-    reminder_id = schedule_job_and_store(alisa_user_id=None, chat_id=target_chat, thread_id=DEFAULT_THREAD_ID, text=command, remind_dt_utc=parsed_dt)
+    reminder_id = schedule_job_and_store(alisa_user_id=None, chat_id=target_chat, thread_id=THREAD_ID, text=command, remind_dt_utc=parsed_dt)
 
     # reply to Alice
     local = parsed_dt.astimezone(MSK)
