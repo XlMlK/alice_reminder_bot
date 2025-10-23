@@ -93,7 +93,7 @@ def parse_time(input_text: str, yandex_request: dict = None):
     parsed_dt_utc = parsed_dt.astimezone(UTC)
     return parsed_dt_utc
 
-def schedule_job_and_store(alisa_user_id, , thread_id, text, remind_dt_utc):
+def schedule_job_and_store(alisa_user_id, chat_id, thread_id, text, remind_dt_utc):
     # store in DB
     iso = remind_dt_utc.isoformat()
     reminder_id = storage.add_reminder(alisa_user_id, str(chat_id), str(thread_id) if thread_id else None, text, iso)
