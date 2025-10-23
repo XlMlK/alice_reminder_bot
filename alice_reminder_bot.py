@@ -16,8 +16,8 @@ import storage
 # ---- Конфигурация (через ENV) ----
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 # Если TELEGRAM_CHAT_ID не задан, бот будет реагировать на любого, кто напишет ему в Telegram
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # опционально
-THREAD_ID = os.getenv("TELEGRAM_THREAD_ID")  # опционально
+CHAT_ID = os.getenv("CHAT_ID")  # опционально
+THREAD_ID = os.getenv("THREAD_ID")  # опционально
 SQLITE_JOBSTORE_DB = os.getenv("SQLITE_JOBSTORE_DB", "sqlite:///reminders.db")  # APScheduler jobstore URL
 
 if not TELEGRAM_TOKEN:
@@ -93,7 +93,7 @@ def parse_time(input_text: str, yandex_request: dict = None):
     parsed_dt_utc = parsed_dt.astimezone(UTC)
     return parsed_dt_utc
 
-def schedule_job_and_store(alisa_user_id, chat_id, thread_id, text, remind_dt_utc):
+def schedule_job_and_store(alisa_user_id, , thread_id, text, remind_dt_utc):
     # store in DB
     iso = remind_dt_utc.isoformat()
     reminder_id = storage.add_reminder(alisa_user_id, str(chat_id), str(thread_id) if thread_id else None, text, iso)
