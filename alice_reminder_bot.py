@@ -1,22 +1,22 @@
 import os
 import re
-import json
 from datetime import datetime, timedelta
 import dateparser
+import pytz
 import telebot
 from flask import Flask, request, jsonify
 
 # === Конфигурация ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")  # твой chat_id
-MESSAGE_THREAD_ID = os.getenv("MESSAGE_THREAD_ID")  # id ветки
+CHAT_ID = os.getenv("CHAT_ID")
+MESSAGE_THREAD_ID = os.getenv("MESSAGE_THREAD_ID")  # можно оставить пустым
+MSK = pytz.timezone("Europe/Moscow")
+
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(__name__)
 
-
-# === Расширенный парсер времени ===
+# === Парсинг даты ===
 def extract_time_and_text(command: str, request_json=None):
-    """Извлекает текст задачи и время напоминания (включая обработку YANDEX.NLU)."""
     task_text = re.sub(r"^напомни( мне)?", "", command, flags=re.IGNORECASE).strip()
     parsed_time = None
 
@@ -39,42 +39,38 @@ def extract_time_and_text(command: str, request_json=None):
                 if val.get("minute_is_relative"):
                     relative_minutes = val.get("minute", 0)
 
-        # "через 1 минуту" или подобные конструкции
         if number and "через" in command:
-            parsed_time = datetime.now() + timedelta(minutes=int(number))
+            parsed_time = datetime.now(MSK) + timedelta(minutes=int(number))
         elif relative_days or relative_hours or relative_minutes:
-            parsed_time = datetime.now() + timedelta(
+            parsed_time = datetime.now(MSK) + timedelta(
                 days=relative_days, hours=relative_hours, minutes=relative_minutes
             )
 
-    # fallback: если NLU не помогло, используем dateparser
     if not parsed_time:
         parsed_time = dateparser.parse(
             task_text,
             languages=["ru"],
-            settings={"PREFER_DATES_FROM": "future"}
+            settings={"PREFER_DATES_FROM": "future", "TIMEZONE": "Europe/Moscow"}
         )
 
     return task_text, parsed_time
 
 
-# === Маршрут для Яндекс.Диалогов ===
+# === Webhook Алисы ===
 @app.route("/alice", methods=["POST"])
 def alice_webhook():
     data = request.json
     command = data.get("request", {}).get("original_utterance", "").lower().strip()
 
-    # Пустой запрос — приветствие
     if not command:
         return jsonify({
             "version": "1.0",
             "response": {
-                "text": "Привет! Я помогу тебе поставить напоминание. Например: «напомни купить хлеб через 10 минут».",
+                "text": "Привет! Я помогу поставить напоминание. Например: «напомни позвонить маме через 5 минут».",
                 "end_session": False
             }
         })
 
-    # Обрабатываем напоминание
     task_text, remind_time = extract_time_and_text(command, data)
 
     if not remind_time:
@@ -86,17 +82,20 @@ def alice_webhook():
             }
         })
 
-    # Форматируем вывод
     remind_time_str = remind_time.strftime("%H:%M:%S %d.%m.%Y")
-
-    # Отправляем в Telegram
     message = f"⏰ Напоминание: {task_text}\n🕒 Время: {remind_time_str}"
-    try:
-        bot.send_message(CHAT_ID, message, message_thread_id=MESSAGE_THREAD_ID)
-    except Exception as e:
-        print(f"Ошибка отправки в Telegram: {e}")
 
-    # Ответ пользователю
+    print(f"Отправка в Telegram: {message}")
+
+    try:
+        if MESSAGE_THREAD_ID:
+            bot.send_message(CHAT_ID, message, message_thread_id=MESSAGE_THREAD_ID)
+        else:
+            bot.send_message(CHAT_ID, message)
+        print("✅ Сообщение отправлено в Telegram")
+    except Exception as e:
+        print(f"❌ Ошибка отправки в Telegram: {e}")
+
     return jsonify({
         "version": "1.0",
         "response": {
@@ -106,13 +105,11 @@ def alice_webhook():
     })
 
 
-# === Проверка сервера ===
 @app.route("/", methods=["GET"])
 def index():
-    return "✅ Reminder bot is running!"
+    return "✅ Reminder bot is running! (Moscow time)"
 
 
-# === Запуск ===
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
 
