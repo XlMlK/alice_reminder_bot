@@ -1,201 +1,118 @@
 import os
 import re
-import sqlite3
-import requests
+import json
+from datetime import datetime, timedelta
 import dateparser
-from datetime import datetime
-from flask import Flask, request
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+import telebot
+from flask import Flask, request, jsonify
 
-# === НАСТРОЙКИ ===
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = int(os.environ.get("CHAT_ID"))
-THREAD_ID = os.environ.get("THREAD_ID")
-THREAD_ID = int(THREAD_ID) if THREAD_ID and THREAD_ID.isdigit() else None
-DATABASE_URL = "sqlite:///reminders.db"
-
-# === НАСТРОЙКА PLANER ===
-jobstores = {"default": SQLAlchemyJobStore(url=DATABASE_URL)}
-scheduler = BackgroundScheduler(jobstores=jobstores)
-scheduler.start()
-
-# === Flask сервер ===
+# === Конфигурация ===
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")  # твой chat_id
+MESSAGE_THREAD_ID = os.getenv("MESSAGE_THREAD_ID")  # id ветки
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(__name__)
 
-# --- Telegram utils ---
-def send_to_telegram(text):
-    """Отправка сообщения в Telegram (с поддержкой message_thread_id)"""
-    data = {"chat_id": CHAT_ID, "text": text}
-    if THREAD_ID:
-        data["message_thread_id"] = THREAD_ID
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data=data
-    )
 
-# --- SQLite utils ---
-def db_connect():
-    conn = sqlite3.connect("reminders.db")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            text TEXT,
-            remind_time TEXT
+# === Расширенный парсер времени ===
+def extract_time_and_text(command: str, request_json=None):
+    """Извлекает текст задачи и время напоминания (включая обработку YANDEX.NLU)."""
+    task_text = re.sub(r"^напомни( мне)?", "", command, flags=re.IGNORECASE).strip()
+    parsed_time = None
+
+    if request_json:
+        entities = request_json.get("request", {}).get("nlu", {}).get("entities", [])
+        number = None
+        relative_days = 0
+        relative_hours = 0
+        relative_minutes = 0
+
+        for e in entities:
+            if e["type"] == "YANDEX.NUMBER":
+                number = e["value"]
+            elif e["type"] == "YANDEX.DATETIME":
+                val = e["value"]
+                if val.get("day_is_relative"):
+                    relative_days = val.get("day", 0)
+                if val.get("hour_is_relative"):
+                    relative_hours = val.get("hour", 0)
+                if val.get("minute_is_relative"):
+                    relative_minutes = val.get("minute", 0)
+
+        # "через 1 минуту" или подобные конструкции
+        if number and "через" in command:
+            parsed_time = datetime.now() + timedelta(minutes=int(number))
+        elif relative_days or relative_hours or relative_minutes:
+            parsed_time = datetime.now() + timedelta(
+                days=relative_days, hours=relative_hours, minutes=relative_minutes
+            )
+
+    # fallback: если NLU не помогло, используем dateparser
+    if not parsed_time:
+        parsed_time = dateparser.parse(
+            task_text,
+            languages=["ru"],
+            settings={"PREFER_DATES_FROM": "future"}
         )
-    """)
-    return conn
 
-def add_task_to_db(text, remind_time):
-    conn = db_connect()
-    conn.execute("INSERT INTO reminders (text, remind_time) VALUES (?, ?)", (text, remind_time.isoformat()))
-    conn.commit()
-    conn.close()
-
-def delete_task_from_db(task_id):
-    conn = db_connect()
-    conn.execute("DELETE FROM reminders WHERE id=?", (task_id,))
-    conn.commit()
-    conn.close()
-
-def get_all_tasks():
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute("SELECT id, text, remind_time FROM reminders ORDER BY remind_time ASC")
-    tasks = cur.fetchall()
-    conn.close()
-    return tasks
-
-# --- Планировщик ---
-def schedule_reminder(text, remind_time):
-    scheduler.add_job(
-        send_to_telegram,
-        "date",
-        run_date=remind_time,
-        args=[f"🔔 Напоминание: {text}"],
-        id=f"{text}_{remind_time.timestamp()}",
-        replace_existing=False
-    )
-    add_task_to_db(text, remind_time)
-
-# --- Разбор даты и текста ---
-def extract_time_and_text(command: str):
-    """Извлекает дату и текст задачи из фразы."""
-    task_text = re.sub(r"^напомни( мне)?", "", command).strip()
-    parsed_time = dateparser.parse(
-        task_text,
-        languages=["ru"],
-        settings={"PREFER_DATES_FROM": "future"}
-    )
     return task_text, parsed_time
 
-# --- Алиса обработчик ---
+
+# === Маршрут для Яндекс.Диалогов ===
 @app.route("/alice", methods=["POST"])
-def handle_alice():
+def alice_webhook():
     data = request.json
-    command = data["request"]["command"].lower().strip()
-    task_text, remind_time = extract_time_and_text(command)
+    command = data.get("request", {}).get("original_utterance", "").lower().strip()
+
+    # Пустой запрос — приветствие
+    if not command:
+        return jsonify({
+            "version": "1.0",
+            "response": {
+                "text": "Привет! Я помогу тебе поставить напоминание. Например: «напомни купить хлеб через 10 минут».",
+                "end_session": False
+            }
+        })
+
+    # Обрабатываем напоминание
+    task_text, remind_time = extract_time_and_text(command, data)
 
     if not remind_time:
-        return alice_response("Не поняла, когда нужно напомнить. Повтори время, пожалуйста.", end_session=False)
+        return jsonify({
+            "version": "1.0",
+            "response": {
+                "text": "Не поняла, когда нужно напомнить. Повтори время, пожалуйста.",
+                "end_session": False
+            }
+        })
 
-    cleaned_text = re.sub(r"\b(сегодня|завтра|через|в|через|дня|час[ауе]?)\b.*", "", task_text).strip()
-    if not cleaned_text:
-        cleaned_text = task_text
+    # Форматируем вывод
+    remind_time_str = remind_time.strftime("%H:%M:%S %d.%m.%Y")
 
-    schedule_reminder(cleaned_text, remind_time)
-    send_to_telegram(f"✅ Создано напоминание: «{cleaned_text}» на {remind_time.strftime('%d.%m %H:%M')}")
-    return alice_response(f"Хорошо, я напомню {cleaned_text} {remind_time.strftime('%d.%m в %H:%M')}")
+    # Отправляем в Telegram
+    message = f"⏰ Напоминание: {task_text}\n🕒 Время: {remind_time_str}"
+    try:
+        bot.send_message(CHAT_ID, message, message_thread_id=MESSAGE_THREAD_ID)
+    except Exception as e:
+        print(f"Ошибка отправки в Telegram: {e}")
 
-def alice_response(text, end_session=True):
-    return {"response": {"text": text, "end_session": end_session}, "version": "1.0"}
+    # Ответ пользователю
+    return jsonify({
+        "version": "1.0",
+        "response": {
+            "text": f"Хорошо, напомню {task_text} в {remind_time.strftime('%H:%M')}.",
+            "end_session": False
+        }
+    })
 
-# --- Telegram обработчик ---
-@app.route(f"/bot/{TELEGRAM_TOKEN}", methods=["POST"])
-def handle_telegram():
-    data = request.json
-    message = data.get("message", {})
-    text = message.get("text", "")
-    chat_id = message["chat"]["id"]
 
-    if chat_id != CHAT_ID:
-        return "ignored"
-
-    if text.startswith("/start"):
-        send_menu(chat_id)
-    elif text.startswith("/menu"):
-        send_menu(chat_id)
-    elif text.startswith("/list"):
-        show_tasks()
-    elif text.startswith("/delete"):
-        delete_task_command(text)
-    elif text.startswith("/status"):
-        send_to_telegram("✅ Планировщик активен. Все задачи выполняются.")
-    elif text.startswith("/add"):
-        send_to_telegram("🗓 Напиши фразу, например:\n/add позвонить маме завтра в 9 утра")
-    elif text.startswith("/"):
-        send_to_telegram("Неизвестная команда. Используй /menu.")
-    else:
-        add_task_via_text(text)
-
-    return "ok"
-
-# --- Telegram подфункции ---
-def send_menu(chat_id):
-    menu = (
-        "📖 Меню напоминаний:\n"
-        "/add – добавить напоминание\n"
-        "/list – показать список\n"
-        "/delete [id] – удалить напоминание\n"
-        "/status – проверить состояние\n"
-        "/menu – показать меню"
-    )
-    data = {"chat_id": chat_id, "text": menu}
-    if THREAD_ID:
-        data["message_thread_id"] = THREAD_ID
-    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", data=data)
-
-def show_tasks():
-    tasks = get_all_tasks()
-    if not tasks:
-        send_to_telegram("📭 У тебя нет активных напоминаний.")
-    else:
-        msg = "📋 Список напоминаний:\n\n"
-        for tid, ttext, ttime in tasks:
-            dt = datetime.fromisoformat(ttime)
-            msg += f"{tid}. {ttext} — {dt.strftime('%d.%m %H:%M')}\n"
-        send_to_telegram(msg)
-
-def delete_task_command(text):
-    parts = text.split()
-    if len(parts) < 2:
-        send_to_telegram("❌ Укажи номер задачи: /delete 3")
-    else:
-        try:
-            task_id = int(parts[1])
-            delete_task_from_db(task_id)
-            send_to_telegram(f"🗑 Напоминание {task_id} удалено.")
-        except Exception:
-            send_to_telegram("⚠️ Неверный ID задачи.")
-
-def add_task_via_text(text):
-    if text.lower().startswith(("добавь", "напомни", "/add")):
-        task_text, remind_time = extract_time_and_text(text)
-        if not remind_time:
-            send_to_telegram("⚠️ Не смог определить время. Пример: /add купить хлеб завтра в 10.")
-            return
-        cleaned_text = re.sub(r"\b(сегодня|завтра|через|в|через|дня|час[ауе]?)\b.*", "", task_text).strip()
-        if not cleaned_text:
-            cleaned_text = task_text
-        schedule_reminder(cleaned_text, remind_time)
-        send_to_telegram(f"✅ Напоминание добавлено: «{cleaned_text}» на {remind_time.strftime('%d.%m %H:%M')}")
-    else:
-        send_to_telegram("Используй /menu для списка команд.")
-
-@app.route("/")
+# === Проверка сервера ===
+@app.route("/", methods=["GET"])
 def index():
-    return "🤖 Reminder бот и навык Алисы активны!"
+    return "✅ Reminder bot is running!"
 
+
+# === Запуск ===
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
 
