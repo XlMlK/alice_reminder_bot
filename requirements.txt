@@ -4,4 +4,5 @@ apscheduler
 sqlalchemy
 dateparser
 pyTelegramBotAPI
+python-dotenv
 pytz
