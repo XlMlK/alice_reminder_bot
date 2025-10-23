@@ -1,4 +1,4 @@
-# app.py
+# alice_reminder_bot.py
 import os
 import logging
 from datetime import datetime, timedelta
