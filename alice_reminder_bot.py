@@ -16,8 +16,8 @@ import storage
 # ---- Конфигурация (через ENV) ----
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 # Если TELEGRAM_CHAT_ID не задан, бот будет реагировать на любого, кто напишет ему в Telegram
-DEFAULT_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # опционально
-DEFAULT_THREAD_ID = os.getenv("TELEGRAM_THREAD_ID")  # опционально
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # опционально
+THREAD_ID = os.getenv("TELEGRAM_THREAD_ID")  # опционально
 SQLITE_JOBSTORE_DB = os.getenv("SQLITE_JOBSTORE_DB", "sqlite:///reminders.db")  # APScheduler jobstore URL
 
 if not TELEGRAM_TOKEN:
