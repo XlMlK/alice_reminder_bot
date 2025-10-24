@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import pytz
 import dateparser
 import json
+import re
 
 from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -51,56 +52,51 @@ scheduler.start()
 # ---- Утилиты ----
 def parse_time(input_text: str, yandex_request: dict = None):
     """
-    Попытка распарсить время: сначала смотрим на YANDEX NLU entities (если есть),
-    потом даём в dateparser (с часовой зоной MSK).
-    Возвращаем timezone-aware datetime в UTC или None.
+    Распознаёт время из текста на русском.
+    Поддерживает: "через 10 минут", "завтра в 12:00", "в 18:30", "через 2 часа".
+    Возвращает datetime в UTC.
     """
+    import re
     input_text = (input_text or "").strip()
     parsed_dt = None
 
-    # 1) Yandex NLU entities
-    if yandex_request:
-        entities = yandex_request.get("request", {}).get("nlu", {}).get("entities", [])
-        # Если YANDEX.DATETIME с относительными полями:
-        for e in entities:
-            if e.get("type") == "YANDEX.DATETIME":
-                val = e.get("value", {})
-                # относительные минуты/hours/days:
-                if val.get("minute_is_relative"):
-                    parsed_dt = datetime.now(MSK) + timedelta(minutes=int(val.get("minute", 0)))
-                elif val.get("hour_is_relative"):
-                    parsed_dt = datetime.now(MSK) + timedelta(hours=int(val.get("hour", 0)))
-                elif val.get("day_is_relative"):
-                    parsed_dt = datetime.now(MSK) + timedelta(days=int(val.get("day", 0)))
-        # также check for NUMBER + "через"
-        if not parsed_dt:
-            number = None
-            for e in entities:
-                if e.get("type") == "YANDEX.NUMBER":
-                    number = e.get("value")
-            if number and "через" in input_text:
-                # default assume minutes
-                parsed_dt = datetime.now(MSK) + timedelta(minutes=int(number))
-
-    # 2) fallback dateparser
-    if not parsed_dt and input_text:
-        dp = dateparser.parse(input_text, languages=["ru"], settings={
+    # 1️⃣ Пытаемся распознать через dateparser
+    dp = dateparser.parse(
+        input_text,
+        languages=["ru"],
+        settings={
             "PREFER_DATES_FROM": "future",
             "RETURN_AS_TIMEZONE_AWARE": True,
             "TIMEZONE": "Europe/Moscow"
-        })
-        if dp:
-            # ensure timezone-aware
-            if dp.tzinfo is None:
-                dp = MSK.localize(dp)
-            parsed_dt = dp.astimezone(MSK)
+        }
+    )
+    if dp:
+        parsed_dt = dp if dp.tzinfo else MSK.localize(dp)
+
+    # 2️⃣ Ручной парсинг "через N минут/часов"
+    if not parsed_dt:
+        m = re.search(r'через\s+(\d+)\s*(минут|минуты|минута|час|часа|часов)', input_text.lower())
+        if m:
+            num = int(m.group(1))
+            if 'час' in m.group(2):
+                parsed_dt = datetime.now(MSK) + timedelta(hours=num)
+            else:
+                parsed_dt = datetime.now(MSK) + timedelta(minutes=num)
 
     if not parsed_dt:
         return None
 
-    # convert to UTC for storage/scheduler
-    parsed_dt_utc = parsed_dt.astimezone(UTC)
-    return parsed_dt_utc
+    return parsed_dt.astimezone(UTC)
+
+def clean_reminder_text(text: str) -> str:
+    """
+    Удаляет слова 'напомни', 'через', 'в', 'завтра' и т.п.
+    Преобразует текст в более естественную форму.
+    """
+    text = text.lower().strip()
+    text = re.sub(r'\b(напомни(ть)?|через|в|завтра|сегодня|пожалуйста)\b', '', text)
+    text = re.sub(r'\s+', ' ', text).strip(' .,:;')
+    return text.capitalize()
 
 def schedule_job_and_store(alisa_user_id, chat_id, thread_id, text, remind_dt_utc):
     # store in DB
@@ -142,23 +138,31 @@ def send_reminder_job(reminder_id: int):
 @bot.message_handler(commands=['start', 'help'])
 def cmd_start(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("/list", "/add", "/start")
-    bot.send_message(message.chat.id,
-                     "Привет! Я бот-напоминалка. Можешь написать мне: «напомни купить хлеб через 10 минут» или использовать команды /list /delete <id> /snooze <id> <min>",
-                     reply_markup=markup)
+    markup.add("🗓 Список напоминаний", "➕ Добавить напоминание", "❌ Удалить напоминание")
+    bot.send_message(
+        message.chat.id,
+        "Привет! 👋 Я бот-напоминалка.\n\n"
+        "Можешь написать: «напомни купить хлеб через 10 минут»\n"
+        "или выбрать действие кнопками ниже 👇",
+        reply_markup=markup
+    )
+@bot.message_handler(func=lambda m: m.text == "🗓 Список напоминаний")
+def button_list(message):
+    cmd_list(message)
 
 @bot.message_handler(commands=['list'])
 def cmd_list(message):
-    # list upcoming for this chat
     chat_id = str(message.chat.id)
-    rows = [r for r in storage.get_all() if r["telegram_chat_id"] == chat_id]
+    rows = [r for r in storage.get_all() if str(r["telegram_chat_id"]) == chat_id]
+
     if not rows:
-        bot.send_message(message.chat.id, "📭 У тебя нет напоминаний.")
+        bot.send_message(message.chat.id, "📭 У тебя нет активных напоминаний.")
         return
-    text = "📋 Твои напоминания:\n"
+
+    text = "📋 Твои напоминания:\n\n"
     for r in rows:
         dt = datetime.fromisoformat(r["remind_ts"]).astimezone(MSK)
-        text += f"{r['id']}. {r['text']} — {dt.strftime('%H:%M %d.%m.%Y')}\n"
+        text += f"🔔 {r['id']}. {r['text']} — 🕒 {dt.strftime('%H:%M %d.%m.%Y')}\n"
     bot.send_message(message.chat.id, text)
 
 @bot.message_handler(commands=['delete'])
@@ -214,17 +218,28 @@ def cmd_snooze(message):
 @bot.message_handler(func=lambda m: True)
 def handle_text(message):
     """
-    If user writes free text, try parse and schedule.
-    Example: "напомни купить хлеб через 10 минут"
+    Если пользователь пишет свободный текст, пытаемся понять время и создать напоминание.
     """
-    text = message.text
+    text = message.text.strip()
     parsed = parse_time(text, None)
     if not parsed:
-        bot.reply_to(message, "Не понял время. Попробуй: «напомни купить хлеб через 10 минут»")
+        bot.reply_to(message, "Не понял время 😅 Попробуй: «напомни купить хлеб через 10 минут»")
         return
-    reminder_id = schedule_job_and_store(alisa_user_id=None, chat_id=message.chat.id, thread_id=None, text=text, remind_dt_utc=parsed)
+
+    clean_text = clean_reminder_text(text)
+    reminder_id = schedule_job_and_store(
+        alisa_user_id=None,
+        chat_id=message.chat.id,
+        thread_id=None,
+        text=clean_text,
+        remind_dt_utc=parsed
+    )
+
     dt_local = parsed.astimezone(MSK)
-    bot.reply_to(message, f"✅ Готово. Напоминание #{reminder_id} в {dt_local.strftime('%H:%M %d.%m.%Y')} (MSK).")
+    bot.reply_to(
+        message,
+        f"✅ Готово! Напомню: {clean_text.lower()} в {dt_local.strftime('%H:%M %d.%m.%Y')} (МСК)."
+    )
 
 # ---- Flask endpoints: Telegram webhook receiver and Yandex Alice ----
 @app.route("/bot/" + TELEGRAM_TOKEN, methods=["POST"])
