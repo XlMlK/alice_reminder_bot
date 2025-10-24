@@ -37,12 +37,13 @@ app = Flask(__name__)
 # ---- Health check endpoint ----
 @app.route("/health", methods=["GET"])
 def health_check():
-    """
-    Простой endpoint для UptimeRobot или других сервисов.
-    Возвращает статус 200 OK и JSON {"status": "ok"}.
-    """
+    """Endpoint для UptimeRobot и проверки работоспособности"""
     return jsonify({"status": "ok"}), 200
 
+# ---- Telegram Bot ----
+bot = TeleBot(TELEGRAM_TOKEN)  
+
+# ---- Scheduler ----
 jobstores = {"default": SQLAlchemyJobStore(url=SQLITE_JOBSTORE_DB)}
 scheduler = BackgroundScheduler(jobstores=jobstores)
 scheduler.start()
@@ -282,9 +283,9 @@ def alice_webhook():
     return jsonify({"version": "1.0", "response": {"text": text, "end_session": False}})
 
 # ---- Health check ----
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok"}), 200
+#@app.route("/health", methods=["GET"])
+#def health():
+#    return jsonify({"status": "ok"}), 200
 
 # ---- On startup: reschedule pending (APScheduler jobstore is persistent, but we ensure) ----
 def reschedule_pending():
